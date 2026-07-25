@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Data and generated artifacts
+data/raw/*
+data/processed/*
+data/embeddings/*
+chroma_db/*
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS and editors
+.DS_Store
+Thumbs.db

@@ -1,0 +1,25 @@
+[project]
+name = "full-rag-project"
+version = "0.1.0"
+description = "Full RAG pipeline using SQuAD v2, ChromaDB, Groq, and Streamlit."
+requires-python = ">=3.12"
+readme = "README.md"
+authors = [{ name = "Author Placeholder" }]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
