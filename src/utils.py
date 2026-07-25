@@ -16,6 +16,8 @@ Responsibilities:
     - Compute-device detection (CUDA / MPS / CPU).
     - Human-readable formatting (file sizes, durations, banners).
     - Boolean parsing from environment-style strings.
+    - Conservative text cleaning (whitespace normalisation) and filename
+      sanitisation, reused by the data layer and later stages.
 
 Author:
     Author Placeholder
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
@@ -106,7 +109,7 @@ def format_file_size(num_bytes: int | float) -> str:
         num_bytes: Number of bytes. Negative values are formatted with a sign.
 
     Returns:
-        A string such as ``"1.50 MB"`` using binary units (KiB/MiB are mapped to
+        A string such as ``"1.50 KB"`` using binary units (KiB/MiB are mapped to
         the common KB/MB labels for readability).
 
     Raises:
@@ -341,3 +344,56 @@ def project_banner(title: str, *, width: int = 60, char: str = "=") -> str:
 
     rule = char * width
     return f"{rule}\n  {title}\n{rule}"
+
+
+def normalize_whitespace(text: str) -> str:
+    """Strip edges and collapse repeated spaces (basic, lossless cleaning).
+
+    This intentionally does **not** lowercase, remove punctuation, tokenize or
+    chunk the text; it only normalises whitespace so it can be reused by the
+    data layer and later preprocessing stages. Internal newlines are preserved.
+
+    Args:
+        text: Raw text to clean.
+
+    Returns:
+        The cleaned text with single internal spaces and trimmed edges.
+
+    Raises:
+        TypeError: If ``text`` is not a string.
+
+    Example:
+        >>> normalize_whitespace("  hello   world  ")
+        'hello world'
+    """
+    if not isinstance(text, str):
+        raise TypeError(f"text must be str, got {type(text).__name__}")
+    return re.sub(r" {2,}", " ", text).strip()
+
+
+def safe_filename(name: str, *, replacement: str = "_") -> str:
+    """Sanitise a string so it is safe to use as a file name.
+
+    Characters that are illegal or problematic on common filesystems are
+    replaced, and runs of the replacement character are collapsed.
+
+    Args:
+        name: Raw name to sanitise.
+        replacement: Character used in place of illegal ones.
+
+    Returns:
+        A filesystem-safe, non-empty name.
+
+    Raises:
+        ValueError: If ``name`` is empty or not a string.
+
+    Example:
+        >>> safe_filename("rajpurkar/squad_v2")
+        'rajpurkar_squad_v2'
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty string")
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', replacement, name)
+    cleaned = re.sub(rf"{re.escape(replacement)}+", replacement, cleaned)
+    cleaned = cleaned.strip(replacement)
+    return cleaned or "unnamed"

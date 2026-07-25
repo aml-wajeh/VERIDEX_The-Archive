@@ -6,9 +6,9 @@ Title:
 Description:
     This module is the single source of truth for every configurable value in
     the project: filesystem paths, model names, retrieval hyper-parameters,
-    application flags, and secrets. All values are loaded from environment
-    variables (with a ``.env`` file via ``python-dotenv``), validated, and
-    exposed through immutable dataclasses.
+    dataset options, application flags, and secrets. All values are loaded from
+    environment variables (with a ``.env`` file via ``python-dotenv``),
+    validated, and exposed through immutable dataclasses.
 
     Importing this module produces **no side effects**: environment loading,
     validation, and directory creation only happen when
@@ -18,6 +18,7 @@ Responsibilities:
     - Auto-detect the project root and derive every directory path.
     - Load and validate environment variables with descriptive errors.
     - Centralize LLM and embedding model names (no hardcoding elsewhere).
+    - Centralize dataset source, cache and export defaults.
     - Provide a lazy, cached :func:`get_settings` singleton.
     - Create required directories automatically on first settings build.
 
@@ -44,6 +45,9 @@ DEFAULT_TOP_K: int = 5
 DEFAULT_CHUNK_SIZE: int = 500
 DEFAULT_CHUNK_OVERLAP: int = 50
 DEFAULT_LOG_LEVEL: str = "INFO"
+DEFAULT_DATASET_NAME: str = "rajpurkar/squad_v2"
+DEFAULT_EXPORT_FORMAT: str = "jsonl"
+DEFAULT_BATCH_SIZE: int = 1000
 APP_NAME: str = "Full RAG Pipeline"
 APP_VERSION: str = "0.1.0"
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
@@ -161,6 +165,30 @@ class RetrievalConfig:
 
 
 @dataclass(frozen=True)
+class DatasetConfig:
+    """Dataset source, caching and export configuration.
+
+    Attributes:
+        dataset_name: Hugging Face dataset identifier (e.g. SQuAD v2).
+        dataset_revision: Optional dataset revision / branch; empty for default.
+        cache_dir: Optional explicit cache dir; empty uses ``cache/datasets``.
+        export_format: Default export format (``jsonl`` / ``csv`` / ``parquet``).
+        batch_size: Placeholder batch size for future streaming processing.
+
+    Example:
+        >>> from src.config import get_settings  # doctest: +SKIP
+        >>> get_settings().dataset.export_format  # doctest: +SKIP
+        'jsonl'
+    """
+
+    dataset_name: str
+    dataset_revision: str
+    cache_dir: str
+    export_format: str
+    batch_size: int
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Application-wide flags.
 
@@ -193,6 +221,7 @@ class Settings:
         models: Model names and generation parameters.
         retrieval: Chunking and retrieval parameters.
         app: Application flags.
+        dataset: Dataset source, cache and export defaults.
         groq_api_key: Groq API key (empty string when unset).
         hf_token: Hugging Face token (empty string when unset).
 
@@ -206,6 +235,7 @@ class Settings:
     models: ModelConfig
     retrieval: RetrievalConfig
     app: AppConfig
+    dataset: DatasetConfig
     groq_api_key: str = ""
     hf_token: str = ""
 
@@ -312,6 +342,10 @@ class Settings:
 
         debug = _env_bool("DEBUG", False)
 
+        batch_size = _env_int("BATCH_SIZE", DEFAULT_BATCH_SIZE)
+        if batch_size <= 0:
+            raise ConfigurationError(f"BATCH_SIZE must be > 0, got {batch_size}.")
+
         models = ModelConfig(
             llm_name=_env_str("MODEL_NAME", DEFAULT_LLM_NAME),
             embedding_model=_env_str("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
@@ -323,6 +357,13 @@ class Settings:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             collection_name=_env_str("COLLECTION_NAME", DEFAULT_COLLECTION_NAME),
+        )
+        dataset = DatasetConfig(
+            dataset_name=_env_str("DATASET_NAME", DEFAULT_DATASET_NAME),
+            dataset_revision=_env_str("DATASET_REVISION", ""),
+            cache_dir=_env_str("DATASET_CACHE_DIR", ""),
+            export_format=_env_str("EXPORT_FORMAT", DEFAULT_EXPORT_FORMAT),
+            batch_size=batch_size,
         )
         app = AppConfig(
             app_name=APP_NAME,
@@ -337,6 +378,7 @@ class Settings:
             models=models,
             retrieval=retrieval,
             app=app,
+            dataset=dataset,
             groq_api_key=_env_str("GROQ_API_KEY", ""),
             hf_token=_env_str("HF_TOKEN", ""),
         )

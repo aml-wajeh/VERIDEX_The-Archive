@@ -15,7 +15,6 @@ Author:
 """
 
 import pytest
-
 from src.rag_pipeline import RAGPipeline
 
 

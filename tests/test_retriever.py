@@ -15,7 +15,6 @@ Author:
 """
 
 import pytest
-
 from src.retriever import Retriever
 
 
