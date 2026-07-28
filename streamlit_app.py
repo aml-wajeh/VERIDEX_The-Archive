@@ -19,7 +19,7 @@ from src.chunker import Chunker
 from src.config import LLMConfig, get_settings
 from src.data_loader import DataLoader, DatasetLoadingError
 from src.embeddings import EmbeddingGenerator
-from src.evaluation import EvaluationEngine
+from src.evaluation import EvaluationEngine, is_refusal
 from src.rag_pipeline import (
     GroqLLMClient,
     PipelineConnectionError,
@@ -397,14 +397,14 @@ def _build_llm(model_name: str, api_key: str) -> GroqLLMClient:
 # Render the persisted answer (so citation / feedback never wipe it)
 # ============================================================
 def _render_answer(slot, q, result, clean_pages, clean_meta, clean_sim):
-    """Draw the answer card + evidence + actions into ``slot``."""
+    """Draw the answer card + evidence + actions into `slot`."""
     confidence = estimate_retrieval_confidence(clean_sim)
     stamp_class = {
         "High": "stamp-high",
         "Medium": "stamp-medium",
         "Low": "stamp-low",
     }[confidence["label"]]
-
+    refused = is_refusal(result["answer"])
     with slot.container():
         st.markdown(
             f"""
@@ -423,46 +423,65 @@ def _render_answer(slot, q, result, clean_pages, clean_meta, clean_sim):
             unsafe_allow_html=True,
         )
 
-        st.markdown(
-            '<div class="evidence-title">Evidence trail</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="evidence-sub">{len(clean_pages)} unique passage(s) '
-            "retrieved, ranked by similarity</div>",
-            unsafe_allow_html=True,
-        )
-
-        if clean_pages:
-            for i, (chunk, meta, sim) in enumerate(
-                zip(clean_pages, clean_meta, clean_sim, strict=True),
-                start=1,
-            ):
-                pct = max(0.0, min(1.0, (sim + 1) / 2)) * 100
-                clean_text = chunk.replace("\n", " ").strip()
-                lead, trail = _citation_edges(clean_text)
-                full = lead + _html.escape(clean_text) + trail
-                title = _html.escape(str(meta.get("title") or "Untitled"))
+        def _draw_cards() -> None:
+            """Render the retrieved-evidence cards (or the empty note)."""
+            if clean_pages:
+                for i, (chunk, meta, sim) in enumerate(
+                    zip(clean_pages, clean_meta, clean_sim, strict=True),
+                    start=1,
+                ):
+                    pct = max(0.0, min(1.0, (sim + 1) / 2)) * 100
+                    clean_text = chunk.replace("\n", " ").strip()
+                    lead, trail = _citation_edges(clean_text)
+                    full = lead + _html.escape(clean_text) + trail
+                    title = _html.escape(str(meta.get("title") or "Untitled"))
+                    st.markdown(
+                        f"""
+                        <div class="index-card">
+                          <div class="row-top">
+                            <span class="rank">CARD {i:02d} · {title}</span>
+                            <span class="sim-score">similarity {sim:.3f}</span>
+                          </div>
+                          <div class="sim-track"><div class="sim-fill" style="width:{pct:.1f}%"></div></div>
+                          <div class="snippet">{full}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            else:
                 st.markdown(
-                    f"""
-                    <div class="index-card">
-                      <div class="row-top">
-                        <span class="rank">CARD {i:02d} · {title}</span>
-                        <span class="sim-score">similarity {sim:.3f}</span>
-                      </div>
-                      <div class="sim-track"><div class="sim-fill" style="width:{pct:.1f}%"></div></div>
-                      <div class="snippet">{full}</div>
-                    </div>
-                    """,
+                    '<div class="no-evidence">No retrieved passage passed the '
+                    "similarity floor — raise “Top-K” or lower “Min evidence "
+                    "similarity” to see more.</div>",
                     unsafe_allow_html=True,
                 )
-        else:
+
+        if refused:
             st.markdown(
-                '<div class="no-evidence">No retrieved passage passed the '
-                "similarity floor — raise “Top-K” or lower “Min evidence "
-                "similarity” to see more.</div>",
+                '<div class="evidence-sub" style="margin-top:1.6rem;">'
+                "🛡️ The archive reviewed the passages below but "
+                "<strong>none of them contained an answer</strong> — so it stayed "
+                "silent instead of guessing. They are collapsed here for "
+                "transparency.</div>",
                 unsafe_allow_html=True,
             )
+            with st.expander(
+                f"🔍 {len(clean_pages)} passage(s) reviewed but insufficient "
+                "— tap to reveal",
+                expanded=False,
+            ):
+                _draw_cards()
+        else:
+            st.markdown(
+                '<div class="evidence-title">Evidence trail</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="evidence-sub">{len(clean_pages)} unique passage(s) '
+                "retrieved, ranked by similarity</div>",
+                unsafe_allow_html=True,
+            )
+            _draw_cards()
 
         st.markdown('<div class="action-row">', unsafe_allow_html=True)
         cc, cu, cd, _ = st.columns([3, 1, 1, 5])
@@ -480,13 +499,11 @@ def _render_answer(slot, q, result, clean_pages, clean_meta, clean_sim):
                 _log_feedback(q, result["answer"], "down")
                 st.session_state[f"fb_{q}"] = "👎 Noted — we'll improve this."
         st.markdown("</div>", unsafe_allow_html=True)
-
         if st.session_state.get("show_cite") == q:
             st.code(
                 _build_citation(q, result, clean_pages, clean_meta, clean_sim),
                 language="markdown",
             )
-
         if st.session_state.get(f"fb_{q}"):
             st.caption(st.session_state[f"fb_{q}"])
 
