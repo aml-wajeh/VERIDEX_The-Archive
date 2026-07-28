@@ -1,5 +1,5 @@
 """
-app.py — "VERIDEX / The Archive": a nocturnal, evidence-grounded RAG console.
+streamlit_app.py — "VERIDEX / The Archive": a nocturnal, evidence-grounded RAG console.
 
 Phase 10 UI, consuming the clean framework-agnostic ``src/`` package only:
     DataLoader -> TextProcessor -> Chunker -> EmbeddingGenerator
