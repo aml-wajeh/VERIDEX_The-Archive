@@ -47,8 +47,7 @@ def _chunk(
 
 
 def _result(
-    chunks: list[RetrievedChunk],
-    retrieval_time: float = 0.01,
+    chunks: list[RetrievedChunk], retrieval_time: float = 0.01
 ) -> RetrievalResult:
     """Wrap chunks into a retrieval result.
 
@@ -118,9 +117,7 @@ class FakeLLM:
     """Stand-in for a chat client exposing ``chat(messages) -> str``."""
 
     def __init__(
-        self,
-        response: str = "The answer.",
-        raise_error: bool = False,
+        self, response: str = "The answer.", raise_error: bool = False
     ) -> None:
         """Initialise the fake client.
 

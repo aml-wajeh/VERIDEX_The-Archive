@@ -1,29 +1,35 @@
-# Python
+# ---------- Python ----------
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
 
-# Virtual environments
+# ---------- Virtual environments ----------
 .venv/
 venv/
 
-# Secrets
+# ---------- Secrets / local IDE config ----------
 .env
-.streamlit/secrets.toml
+.streamlit/
 
-# Data and generated artifacts
-data/raw/*
-data/processed/*
-data/embeddings/*
-chroma_db/*
+# ---------- Data & generated artifacts (ALL of data/ is generated/downloaded) ----------
+data/
+chroma_db/
 
-# Notebooks
+# ---------- Logs & scratch ----------
+logs/
+tmp/
+cache/
+
+# ---------- Notebooks ----------
 .ipynb_checkpoints/
 
-# OS and editors
+# ---------- OS & editors ----------
 .DS_Store
 Thumbs.db

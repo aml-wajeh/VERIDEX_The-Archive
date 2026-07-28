@@ -23,14 +23,14 @@ Responsibilities:
     - Export processed splits to disk in configurable formats with ``tqdm``.
 
 Author:
-    Author Placeholder
+    Aml
 """
 
 from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sized
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -368,8 +368,7 @@ class DataLoader:
         """
         if split not in self._documents:
             raise DatasetLoadingError(
-                f"Split '{split}' is not loaded. "
-                f"Available splits: {self.splits()}"
+                f"Split '{split}' is not loaded. Available splits: {self.splits()}"
             )
         return self._documents[split]
 
@@ -659,8 +658,7 @@ class DataLoader:
             dataframe.to_parquet(path, index=False)
         except (ImportError, ValueError) as exc:
             raise DatasetExportError(
-                "Parquet export failed; ensure 'pyarrow' or 'fastparquet' "
-                "is installed."
+                "Parquet export failed; ensure 'pyarrow' or 'fastparquet' is installed."
             ) from exc
 
     # --------------------------------------------------------- internal build
@@ -702,7 +700,7 @@ class DataLoader:
         """
         docs: list[Document] = []
         errors: list[str] = []
-        total = len(rows) if hasattr(rows, "__len__") else None
+        total = len(rows) if isinstance(rows, Sized) else None
         for row in tqdm(rows, total=total, desc=f"build {split}"):
             try:
                 docs.append(self._row_to_document(row, split))

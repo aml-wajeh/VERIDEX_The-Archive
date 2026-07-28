@@ -1,527 +1,903 @@
-"""Centralized application configuration.
-
-Title:
-    Centralized Configuration
-
-Description:
-    This module is the single source of truth for every configurable value in
-    the project: filesystem paths, model names, retrieval hyper-parameters,
-    dataset options, application flags, and secrets. All values are loaded from
-    environment variables (with a ``.env`` file via ``python-dotenv``),
-    validated, and exposed through immutable dataclasses.
-
-    Importing this module produces **no side effects**: environment loading,
-    validation, and directory creation only happen when
-    :func:`get_settings` is called.
-
-Responsibilities:
-    - Auto-detect the project root and derive every directory path.
-    - Load and validate environment variables with descriptive errors.
-    - Centralize LLM and embedding model names (no hardcoding elsewhere).
-    - Centralize dataset source, cache and export defaults.
-    - Provide a lazy, cached :func:`get_settings` singleton.
-    - Create required directories automatically on first settings build.
-
-Author:
-    Author Placeholder
-"""
+"""Application configuration for the RAG pipeline."""
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+import dataclasses
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Literal
 
-from . import utils
+# ---------------------------------------------------------------------------
+# Base paths
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = BASE_DIR / "data"
+PROCESSED_DATA_DIR = DATA_DIR / "processed"
+PROCESSED_CHUNKS_DIR = PROCESSED_DATA_DIR / "chunks"
+EMBEDDINGS_DIR = DATA_DIR / "embeddings"
+MODEL_CACHE_DIR = DATA_DIR / "models" / "sentence_transformers"
 
-# Named constants (never magic numbers).
-DEFAULT_SEED: int = 42
-DEFAULT_LLM_NAME: str = "llama-3.1-8b-instant"
-DEFAULT_EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_COLLECTION_NAME: str = "squad_v2_chunks"
+ASSETS_DIR = BASE_DIR / "assets"
+RAW_DIR = DATA_DIR / "raw"
+LOGS_DIR = BASE_DIR / "logs"
+TMP_DIR = BASE_DIR / "tmp"
+CACHE_DIR = DATA_DIR / "cache"
+CHROMA_DIR = BASE_DIR / "chroma_db"
+
+CHROMA_DB_DIR: Path = CHROMA_DIR
+DEFAULT_COLLECTION_NAME: str = "squad_v2_rag"
+DEFAULT_TOP_K: int = 4
+
+DEFAULT_MODEL_NAME: str = "llama-3.3-70b-versatile"
 DEFAULT_TEMPERATURE: float = 0.0
 DEFAULT_MAX_TOKENS: int = 512
-DEFAULT_TOP_K: int = 5
-DEFAULT_CHUNK_SIZE: int = 500
-DEFAULT_CHUNK_OVERLAP: int = 50
-DEFAULT_LOG_LEVEL: str = "INFO"
-DEFAULT_DATASET_NAME: str = "rajpurkar/squad_v2"
-DEFAULT_EXPORT_FORMAT: str = "jsonl"
-DEFAULT_BATCH_SIZE: int = 1000
-APP_NAME: str = "Full RAG Pipeline"
-APP_VERSION: str = "0.1.0"
-_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+GROQ_API_KEY_ENV: str = "GROQ_API_KEY"
+
+# ---------------------------------------------------------------------------
+# Literal types
+# ---------------------------------------------------------------------------
+ChunkStrategy = Literal[
+    "recursive_character",
+    "character",
+    "sentence",
+    "semantic",
+]
+ExportFormat = Literal[
+    "json",
+    "jsonl",
+    "csv",
+    "parquet",
+]
+EmbeddingExportFormat = Literal[
+    "npy",
+    "pickle",
+    "parquet",
+    "json",
+]
+
+_ALLOWED_CHUNK_STRATEGIES = frozenset(
+    {
+        "recursive_character",
+        "character",
+        "sentence",
+        "semantic",
+    }
+)
+_ALLOWED_EXPORT_FORMATS = frozenset(
+    {
+        "json",
+        "jsonl",
+        "csv",
+        "parquet",
+    }
+)
+_ALLOWED_EMBEDDING_EXPORT_FORMATS = frozenset(
+    {
+        "npy",
+        "pickle",
+        "parquet",
+        "json",
+    }
+)
+_ALLOWED_HNSW_SPACES = frozenset({"cosine", "l2", "ip"})
 
 
-class ConfigurationError(Exception):
-    """Raised when configuration is missing, invalid, or inconsistent."""
+# ---------------------------------------------------------------------------
+# Chunking configuration (Phase 4)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ChunkingConfig:
+    """Configuration for text processing, chunking, and export.
+
+    Attributes:
+        chunk_size: Maximum number of characters per chunk.
+        chunk_overlap: Number of overlapping characters between chunks.
+        chunk_strategy: Chunk splitting strategy.
+        export_format: Default export format.
+        enable_cleaning: Whether to apply text cleaning.
+        enable_normalization: Whether to apply text normalization.
+        future_semantic_chunking: Reserved flag for future semantic chunking.
+        processed_chunks_dir: Output directory for exported chunks.
+        recursive_separators: Separators used by recursive character chunking.
+        sentence_endings: Single-character sentence ending markers.
+        min_chunk_length: Minimum accepted chunk length after splitting.
+    """
+
+    chunk_size: int = 500
+    chunk_overlap: int = 100
+    chunk_strategy: ChunkStrategy = "recursive_character"
+    export_format: ExportFormat = "jsonl"
+    enable_cleaning: bool = True
+    enable_normalization: bool = True
+    future_semantic_chunking: bool = False
+    processed_chunks_dir: Path = PROCESSED_CHUNKS_DIR
+    recursive_separators: tuple[str, ...] = ("\n\n", "\n", ". ", " ", "")
+    sentence_endings: tuple[str, ...] = (".", "?", "!")
+    min_chunk_length: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate and normalize configuration values."""
+        if isinstance(self.processed_chunks_dir, str):
+            object.__setattr__(
+                self,
+                "processed_chunks_dir",
+                Path(self.processed_chunks_dir),
+            )
+
+        if not isinstance(self.processed_chunks_dir, Path):
+            object.__setattr__(
+                self,
+                "processed_chunks_dir",
+                Path(str(self.processed_chunks_dir)),
+            )
+
+        if isinstance(self.recursive_separators, str):
+            object.__setattr__(
+                self,
+                "recursive_separators",
+                (self.recursive_separators,),
+            )
+
+        if not isinstance(self.recursive_separators, tuple):
+            object.__setattr__(
+                self,
+                "recursive_separators",
+                tuple(self.recursive_separators),
+            )
+
+        if isinstance(self.sentence_endings, str):
+            object.__setattr__(
+                self,
+                "sentence_endings",
+                (self.sentence_endings,),
+            )
+
+        if not isinstance(self.sentence_endings, tuple):
+            object.__setattr__(
+                self,
+                "sentence_endings",
+                tuple(self.sentence_endings),
+            )
+
+        if self.chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero.")
+
+        if self.chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be zero or positive.")
+
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size.")
+
+        if self.chunk_strategy not in _ALLOWED_CHUNK_STRATEGIES:
+            raise ValueError("Unsupported chunk_strategy.")
+
+        if self.export_format not in _ALLOWED_EXPORT_FORMATS:
+            raise ValueError("Unsupported export_format.")
+
+        if self.min_chunk_length <= 0 or self.min_chunk_length > self.chunk_size:
+            raise ValueError("min_chunk_length must be between 1 and chunk_size.")
+
+        if not self.recursive_separators:
+            raise ValueError("recursive_separators must not be empty.")
+
+        if not self.sentence_endings:
+            raise ValueError("sentence_endings must not be empty.")
+
+        if any(len(marker) != 1 for marker in self.sentence_endings):
+            raise ValueError("sentence_endings must contain single-character markers.")
 
 
+# ---------------------------------------------------------------------------
+# Embedding configuration (Phase 5)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class EmbeddingConfig:
+    """Configuration for embedding generation and export.
+
+    Attributes:
+        embedding_model: Sentence Transformers model name.
+        batch_size: Number of texts encoded per batch.
+        normalize_embeddings: Whether to L2-normalize embeddings.
+        device: Torch device. If None or "auto", CUDA is used when available.
+        cache_folder: Optional cache directory for model artifacts.
+        export_format: Default embedding export format.
+        future_quantization: Reserved flag for future quantization support.
+        embeddings_dir: Output directory for exported embeddings.
+    """
+
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    batch_size: int = 32
+    normalize_embeddings: bool = True
+    device: str | None = None
+    cache_folder: Path | None = MODEL_CACHE_DIR
+    export_format: EmbeddingExportFormat = "npy"
+    future_quantization: bool = False
+    embeddings_dir: Path = EMBEDDINGS_DIR
+
+    def __post_init__(self) -> None:
+        """Validate and normalize embedding configuration values."""
+        if isinstance(self.cache_folder, str):
+            object.__setattr__(
+                self,
+                "cache_folder",
+                Path(self.cache_folder),
+            )
+
+        if self.cache_folder is not None and not isinstance(
+            self.cache_folder,
+            Path,
+        ):
+            object.__setattr__(
+                self,
+                "cache_folder",
+                Path(str(self.cache_folder)),
+            )
+
+        if isinstance(self.embeddings_dir, str):
+            object.__setattr__(
+                self,
+                "embeddings_dir",
+                Path(self.embeddings_dir),
+            )
+
+        if not isinstance(self.embeddings_dir, Path):
+            object.__setattr__(
+                self,
+                "embeddings_dir",
+                Path(str(self.embeddings_dir)),
+            )
+
+        if self.device is not None and not isinstance(self.device, str):
+            object.__setattr__(self, "device", str(self.device))
+
+        if self.device == "":
+            object.__setattr__(self, "device", None)
+
+        if not self.embedding_model.strip():
+            raise ValueError("embedding_model must not be empty.")
+
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero.")
+
+        if self.export_format not in _ALLOWED_EMBEDDING_EXPORT_FORMATS:
+            raise ValueError("Unsupported embedding export_format.")
+
+
+# ---------------------------------------------------------------------------
+# Vector store configuration (Phase 6)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class VectorStoreConfig:
+    """Configuration for the Chroma vector store.
+
+    Attributes:
+        persist_directory: Directory for a persistent store. ``None`` selects
+            an in-memory (ephemeral) store, which is ideal for tests.
+        collection_name: Chroma collection name.
+        hnsw_space: Distance space baked into the collection at creation time.
+        add_batch_size: Number of vectors written per ``collection.add`` call.
+    """
+
+    persist_directory: Path | None = CHROMA_DB_DIR
+    collection_name: str = DEFAULT_COLLECTION_NAME
+    hnsw_space: str = "cosine"
+    add_batch_size: int = 1000
+
+    def __post_init__(self) -> None:
+        """Validate and normalize vector store configuration values."""
+        if isinstance(self.persist_directory, str):
+            object.__setattr__(
+                self,
+                "persist_directory",
+                Path(self.persist_directory),
+            )
+
+        if self.persist_directory is not None and not isinstance(
+            self.persist_directory,
+            Path,
+        ):
+            object.__setattr__(
+                self,
+                "persist_directory",
+                Path(str(self.persist_directory)),
+            )
+
+        if not self.collection_name.strip():
+            raise ValueError("collection_name must not be empty.")
+
+        if self.hnsw_space not in _ALLOWED_HNSW_SPACES:
+            raise ValueError("Unsupported hnsw_space.")
+
+        if self.add_batch_size <= 0:
+            raise ValueError("add_batch_size must be greater than zero.")
+
+
+# ---------------------------------------------------------------------------
+# Retriever configuration (Phase 7)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RetrieverConfig:
+    """Configuration for similarity retrieval.
+
+    Attributes:
+        top_k: Default number of chunks to retrieve per query.
+        min_similarity: Optional similarity floor; hits below it are dropped.
+            ``None`` disables filtering. Valid range for the cosine space is
+            ``[-1, 1]``.
+    """
+
+    top_k: int = DEFAULT_TOP_K
+    min_similarity: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate retriever configuration values."""
+        if self.top_k <= 0:
+            raise ValueError("top_k must be greater than zero.")
+
+        if self.min_similarity is not None and not (-1.0 <= self.min_similarity <= 1.0):
+            raise ValueError("min_similarity must be within [-1, 1] or None.")
+
+
+# ---------------------------------------------------------------------------
+# LLM configuration (Phase 8)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class LLMConfig:
+    """Configuration for the generation (LLM) step.
+
+    The ``src`` package talks to Groq through the official ``groq`` SDK
+    directly (no LangChain), keeping the package framework-agnostic. The API
+    key is never stored here; it is read from the environment variable named
+    by ``api_key_env`` (or injected explicitly at client-construction time).
+
+    Attributes:
+        model_name: Groq model identifier.
+        temperature: Sampling temperature (0.0 = deterministic).
+        max_tokens: Optional maximum number of tokens to generate.
+        api_key_env: Name of the environment variable holding the API key.
+        request_timeout: Optional per-request timeout in seconds.
+    """
+
+    model_name: str = DEFAULT_MODEL_NAME
+    temperature: float = DEFAULT_TEMPERATURE
+    max_tokens: int | None = DEFAULT_MAX_TOKENS
+    api_key_env: str = GROQ_API_KEY_ENV
+    request_timeout: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate LLM configuration values."""
+        if not self.model_name.strip():
+            raise ValueError("model_name must not be empty.")
+
+        if not 0.0 <= self.temperature <= 2.0:
+            raise ValueError("temperature must be within [0, 2].")
+
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError("max_tokens must be greater than zero or None.")
+
+        if not self.api_key_env.strip():
+            raise ValueError("api_key_env must not be empty.")
+
+        if self.request_timeout is not None and self.request_timeout <= 0:
+            raise ValueError("request_timeout must be greater than zero or None.")
+
+
+# ---------------------------------------------------------------------------
+# Evaluation configuration (Phase 9)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class EvaluationConfig:
+    """Configuration for the evaluation engine.
+
+    Attributes:
+        top_k: Number of chunks the pipeline retrieves per evaluated question.
+        max_questions: Optional cap on how many questions are evaluated (the
+            first ``max_questions`` items are taken; ``None`` evaluates all).
+            The caller is responsible for any random sampling before passing
+            the questions in, so evaluation stays deterministic.
+        include_unanswerable: Whether to evaluate unanswerable questions (the
+            SQuAD v2 "refusal" cases). When ``False`` they are skipped.
+    """
+
+    top_k: int = DEFAULT_TOP_K
+    max_questions: int | None = None
+    include_unanswerable: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate evaluation configuration values."""
+        if self.top_k <= 0:
+            raise ValueError("top_k must be greater than zero.")
+
+        if self.max_questions is not None and self.max_questions <= 0:
+            raise ValueError("max_questions must be greater than zero or None.")
+
+
+# ---------------------------------------------------------------------------
+# Path configuration (data-loading layer)
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class PathConfig:
-    """Immutable filesystem layout derived from the project root.
+    """Centralised filesystem layout for the whole project.
 
     Attributes:
-        project_root: Repository root directory (auto-detected).
-        assets_dir: Static assets (images, diagrams).
+        project_root: Repository / project root directory.
+        assets_dir: Static assets directory.
         data_dir: Top-level data directory.
-        raw_dir: Raw, untouched datasets.
-        processed_dir: Cleaned / transformed datasets.
-        embeddings_dir: Cached embedding artifacts.
-        logs_dir: Application log files.
-        tmp_dir: Ephemeral scratch files.
-        cache_dir: Reusable caches.
-        chroma_dir: Persisted Chroma vector store.
-
-    Example:
-        >>> from src.config import get_settings  # doctest: +SKIP
-        >>> get_settings().paths.raw_dir.name  # doctest: +SKIP
-        'raw'
+        raw_dir: Raw, untouched dataset dumps.
+        processed_dir: Cleaned / processed artefacts.
+        embeddings_dir: Persisted embedding vectors.
+        logs_dir: Log files.
+        tmp_dir: Scratch / temporary files.
+        cache_dir: Generic cache (datasets, models, ...).
+        chroma_dir: Persistent ChromaDB vector-store directory.
     """
 
-    project_root: Path
-    assets_dir: Path
-    data_dir: Path
-    raw_dir: Path
-    processed_dir: Path
-    embeddings_dir: Path
-    logs_dir: Path
-    tmp_dir: Path
-    cache_dir: Path
-    chroma_dir: Path
+    project_root: Path = BASE_DIR
+    assets_dir: Path = ASSETS_DIR
+    data_dir: Path = DATA_DIR
+    raw_dir: Path = RAW_DIR
+    processed_dir: Path = PROCESSED_DATA_DIR
+    embeddings_dir: Path = EMBEDDINGS_DIR
+    logs_dir: Path = LOGS_DIR
+    tmp_dir: Path = TMP_DIR
+    cache_dir: Path = CACHE_DIR
+    chroma_dir: Path = CHROMA_DIR
 
-    @property
-    def squad_train_path(self) -> Path:
-        """Return the expected SQuAD v2 training file path.
-
-        Returns:
-            ``<raw_dir>/train-v2.0.json``.
-        """
-        return self.raw_dir / "train-v2.0.json"
-
-    def ensure_directories(self) -> list[Path]:
-        """Create every managed directory if it does not already exist.
-
-        Returns:
-            The list of directory paths that were ensured.
-        """
-        managed = (
-            self.assets_dir,
-            self.data_dir,
-            self.raw_dir,
-            self.processed_dir,
-            self.embeddings_dir,
-            self.logs_dir,
-            self.tmp_dir,
-            self.cache_dir,
-            self.chroma_dir,
-        )
-        return [utils.ensure_directory(directory) for directory in managed]
+    def __post_init__(self) -> None:
+        """Coerce any string path fields to ``Path`` instances."""
+        for field_def in dataclasses.fields(self):
+            value = getattr(self, field_def.name)
+            if isinstance(value, str):
+                object.__setattr__(self, field_def.name, Path(value))
 
 
-@dataclass(frozen=True)
-class ModelConfig:
-    """Model names and generation hyper-parameters.
-
-    Attributes:
-        llm_name: Groq chat-completion model identifier.
-        embedding_model: Sentence-transformers model identifier.
-        temperature: Sampling temperature for generation.
-        max_tokens: Maximum generated tokens per response.
-
-    Example:
-        >>> from src.config import get_settings  # doctest: +SKIP
-        >>> get_settings().models.temperature >= 0  # doctest: +SKIP
-        True
-    """
-
-    llm_name: str
-    embedding_model: str
-    temperature: float
-    max_tokens: int
-
-
-@dataclass(frozen=True)
-class RetrievalConfig:
-    """Chunking and retrieval hyper-parameters.
-
-    Attributes:
-        top_k: Number of chunks retrieved per query.
-        chunk_size: Chunk length in characters / tokens (pipeline-defined unit).
-        chunk_overlap: Overlap between consecutive chunks.
-        collection_name: Chroma collection name.
-
-    Example:
-        >>> from src.config import get_settings  # doctest: +SKIP
-        >>> r = get_settings().retrieval  # doctest: +SKIP
-        >>> r.chunk_overlap < r.chunk_size  # doctest: +SKIP
-        True
-    """
-
-    top_k: int
-    chunk_size: int
-    chunk_overlap: int
-    collection_name: str
-
-
+# ---------------------------------------------------------------------------
+# Dataset configuration (data-loading layer)
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DatasetConfig:
-    """Dataset source, caching and export configuration.
+    """Configuration for dataset ingestion.
 
     Attributes:
-        dataset_name: Hugging Face dataset identifier (e.g. SQuAD v2).
-        dataset_revision: Optional dataset revision / branch; empty for default.
-        cache_dir: Optional explicit cache dir; empty uses ``cache/datasets``.
-        export_format: Default export format (``jsonl`` / ``csv`` / ``parquet``).
-        batch_size: Placeholder batch size for future streaming processing.
-
-    Example:
-        >>> from src.config import get_settings  # doctest: +SKIP
-        >>> get_settings().dataset.export_format  # doctest: +SKIP
-        'jsonl'
+        dataset_name: HuggingFace dataset identifier (e.g. ``rajpurkar/squad_v2``).
+        dataset_revision: Optional dataset revision / commit / branch.
+        cache_dir: Optional local cache directory for the downloaded dataset.
+        export_format: Default serialisation format for exported documents.
+        batch_size: Processing / export batch size.
     """
 
-    dataset_name: str
-    dataset_revision: str
-    cache_dir: str
-    export_format: str
-    batch_size: int
+    dataset_name: str = "rajpurkar/squad_v2"
+    dataset_revision: str = ""
+    cache_dir: str = ""
+    export_format: str = "jsonl"
+    batch_size: int = 100
+
+    def __post_init__(self) -> None:
+        """Validate dataset configuration values."""
+        if not self.dataset_name.strip():
+            raise ValueError("dataset_name must not be empty.")
+
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero.")
 
 
+# ---------------------------------------------------------------------------
+# Top-level application configuration
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AppConfig:
-    """Application-wide flags.
+    """Top-level application configuration.
 
     Attributes:
-        app_name: Human-readable application name.
-        app_version: Semantic version string.
-        debug: Whether debug mode is enabled.
-        log_level: Active log level name.
-        seed: Deterministic seed applied at bootstrap.
-
-    Example:
-        >>> from src.config import get_settings  # doctest: +SKIP
-        >>> isinstance(get_settings().app.debug, bool)  # doctest: +SKIP
-        True
+        chunking: Chunking and text-processing configuration.
+        embedding: Embedding-generation configuration.
+        vector_store: Vector-store configuration.
+        retriever: Retriever configuration.
+        llm: LLM / generation configuration.
+        evaluation: Evaluation configuration.
     """
 
-    app_name: str
-    app_version: str
-    debug: bool
-    log_level: str
-    seed: int
+    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
+    retriever: RetrieverConfig = field(default_factory=RetrieverConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
 
+# ---------------------------------------------------------------------------
+# Unified settings facade (used by notebooks & docs)
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Settings:
-    """Top-level, immutable settings container.
+    """Convenience facade exposing every config block from one object.
 
     Attributes:
-        paths: Filesystem layout.
-        models: Model names and generation parameters.
-        retrieval: Chunking and retrieval parameters.
-        app: Application flags.
-        dataset: Dataset source, cache and export defaults.
-        groq_api_key: Groq API key (empty string when unset).
-        hf_token: Hugging Face token (empty string when unset).
-
-    Example:
-        >>> from src.config import get_settings  # doctest: +SKIP
-        >>> get_settings().device in {"cuda", "mps", "cpu"}  # doctest: +SKIP
-        True
+        dataset: Dataset-ingestion configuration.
+        paths: Filesystem layout configuration.
+        chunking: Chunking / text-processing configuration.
+        embedding: Embedding-generation configuration.
+        vector_store: Vector-store configuration.
+        retriever: Retriever configuration.
+        llm: LLM / generation configuration.
+        evaluation: Evaluation configuration.
     """
 
-    paths: PathConfig
-    models: ModelConfig
-    retrieval: RetrievalConfig
-    app: AppConfig
     dataset: DatasetConfig
-    groq_api_key: str = ""
-    hf_token: str = ""
-
-    @property
-    def device(self) -> str:
-        """Return the detected compute device (``cuda``/``mps``/``cpu``).
-
-        Returns:
-            The device string from :func:`src.utils.get_device`.
-        """
-        return utils.get_device()
-
-    def require_secrets(self, *names: str) -> None:
-        """Assert that named secrets are present, raising otherwise.
-
-        Use this at the start of any phase that needs a credential (for example
-        generation needs ``groq_api_key``). Building settings does *not* require
-        secrets so that offline phases (embedding, indexing) still work.
-
-        Args:
-            *names: Secret attribute names on this instance, e.g.
-                ``"groq_api_key"``.
-
-        Returns:
-            ``None``.
-
-        Raises:
-            ConfigurationError: If any requested secret is empty, listing all
-                missing names in a single descriptive message.
-
-        Example:
-            >>> Settings.from_env().require_secrets()  # no-op when no names
-        """
-        available = {"groq_api_key": self.groq_api_key, "hf_token": self.hf_token}
-        unknown = [name for name in names if name not in available]
-        if unknown:
-            raise ConfigurationError(f"Unknown secret name(s): {unknown}")
-
-        missing = [name for name in names if not available[name].strip()]
-        if missing:
-            raise ConfigurationError(
-                "Missing required secret(s): "
-                f"{missing}. Provide them via the .env file or environment "
-                "variables (never hardcode them)."
-            )
-
-    @classmethod
-    def from_env(cls) -> Settings:
-        """Build settings from environment variables and ``.env``.
-
-        Returns:
-            A fully validated :class:`Settings` instance.
-
-        Raises:
-            ConfigurationError: If any value fails type or range validation.
-        """
-        _ensure_env_loaded()
-
-        project_root = Path(__file__).resolve().parents[1]
-        paths = PathConfig(
-            project_root=project_root,
-            assets_dir=project_root / "assets",
-            data_dir=project_root / "data",
-            raw_dir=project_root / "data" / "raw",
-            processed_dir=project_root / "data" / "processed",
-            embeddings_dir=project_root / "data" / "embeddings",
-            logs_dir=project_root / "logs",
-            tmp_dir=project_root / "tmp",
-            cache_dir=project_root / "cache",
-            chroma_dir=project_root / "chroma_db",
-        )
-
-        temperature = _env_float("TEMPERATURE", DEFAULT_TEMPERATURE)
-        if not 0.0 <= temperature <= 2.0:
-            raise ConfigurationError(
-                f"TEMPERATURE must be within [0.0, 2.0], got {temperature}."
-            )
-
-        max_tokens = _env_int("MAX_TOKENS", DEFAULT_MAX_TOKENS)
-        if max_tokens <= 0:
-            raise ConfigurationError(f"MAX_TOKENS must be > 0, got {max_tokens}.")
-
-        top_k = _env_int("TOP_K", DEFAULT_TOP_K)
-        if top_k <= 0:
-            raise ConfigurationError(f"TOP_K must be > 0, got {top_k}.")
-
-        chunk_size = _env_int("CHUNK_SIZE", DEFAULT_CHUNK_SIZE)
-        if chunk_size <= 0:
-            raise ConfigurationError(f"CHUNK_SIZE must be > 0, got {chunk_size}.")
-
-        chunk_overlap = _env_int("CHUNK_OVERLAP", DEFAULT_CHUNK_OVERLAP)
-        if chunk_overlap < 0 or chunk_overlap >= chunk_size:
-            raise ConfigurationError(
-                "CHUNK_OVERLAP must satisfy 0 <= CHUNK_OVERLAP < CHUNK_SIZE, "
-                f"got overlap={chunk_overlap}, size={chunk_size}."
-            )
-
-        log_level = _env_str("LOG_LEVEL", DEFAULT_LOG_LEVEL).upper()
-        if log_level not in _VALID_LOG_LEVELS:
-            raise ConfigurationError(
-                f"LOG_LEVEL must be one of {sorted(_VALID_LOG_LEVELS)}, "
-                f"got '{log_level}'."
-            )
-
-        debug = _env_bool("DEBUG", False)
-
-        batch_size = _env_int("BATCH_SIZE", DEFAULT_BATCH_SIZE)
-        if batch_size <= 0:
-            raise ConfigurationError(f"BATCH_SIZE must be > 0, got {batch_size}.")
-
-        models = ModelConfig(
-            llm_name=_env_str("MODEL_NAME", DEFAULT_LLM_NAME),
-            embedding_model=_env_str("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        retrieval = RetrievalConfig(
-            top_k=top_k,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            collection_name=_env_str("COLLECTION_NAME", DEFAULT_COLLECTION_NAME),
-        )
-        dataset = DatasetConfig(
-            dataset_name=_env_str("DATASET_NAME", DEFAULT_DATASET_NAME),
-            dataset_revision=_env_str("DATASET_REVISION", ""),
-            cache_dir=_env_str("DATASET_CACHE_DIR", ""),
-            export_format=_env_str("EXPORT_FORMAT", DEFAULT_EXPORT_FORMAT),
-            batch_size=batch_size,
-        )
-        app = AppConfig(
-            app_name=APP_NAME,
-            app_version=APP_VERSION,
-            debug=debug,
-            log_level=log_level,
-            seed=DEFAULT_SEED,
-        )
-
-        return cls(
-            paths=paths,
-            models=models,
-            retrieval=retrieval,
-            app=app,
-            dataset=dataset,
-            groq_api_key=_env_str("GROQ_API_KEY", ""),
-            hf_token=_env_str("HF_TOKEN", ""),
-        )
+    paths: PathConfig
+    chunking: ChunkingConfig
+    embedding: EmbeddingConfig
+    vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
+    retriever: RetrieverConfig = field(default_factory=RetrieverConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
 
 # ---------------------------------------------------------------------------
-# Environment parsing helpers (private, no side effects beyond os.getenv).
+# Singletons
 # ---------------------------------------------------------------------------
+CONFIG = AppConfig()
+CHUNKING_CONFIG = CONFIG.chunking
+EMBEDDING_CONFIG = CONFIG.embedding
+VECTOR_STORE_CONFIG = CONFIG.vector_store
+RETRIEVER_CONFIG = CONFIG.retriever
+LLM_CONFIG = CONFIG.llm
+EVALUATION_CONFIG = CONFIG.evaluation
+DATASET_CONFIG = DatasetConfig()
+PATH_CONFIG = PathConfig()
 
 
-def _env_str(name: str, default: str) -> str:
-    """Read a string env var, returning ``default`` when unset/blank.
-
-    Args:
-        name: Environment variable name.
-        default: Fallback value.
+def get_settings() -> Settings:
+    """Return a unified `Settings` object built from the module singletons.
 
     Returns:
-        The trimmed value or ``default``.
+        A `Settings` instance wiring together every configuration block.
     """
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    return raw.strip()
+    return Settings(
+        dataset=DATASET_CONFIG,
+        paths=PATH_CONFIG,
+        chunking=CHUNKING_CONFIG,
+        embedding=EMBEDDING_CONFIG,
+        vector_store=VECTOR_STORE_CONFIG,
+        retriever=RETRIEVER_CONFIG,
+        llm=LLM_CONFIG,
+        evaluation=EVALUATION_CONFIG,
+    )
 
 
-def _env_int(name: str, default: int) -> int:
-    """Read an integer env var with a descriptive error on bad input.
+# ---------------------------------------------------------------------------
+# Resolvers
+# ---------------------------------------------------------------------------
+def resolve_chunking_config(
+    config: ChunkingConfig | AppConfig | Any | None = None,
+) -> ChunkingConfig:
+    """Resolve a user-supplied configuration object to `ChunkingConfig`.
 
     Args:
-        name: Environment variable name.
-        default: Fallback value when unset/blank.
+        config: A configuration object, mapping, or None.
 
     Returns:
-        The parsed integer.
+        A concrete `ChunkingConfig` instance.
 
     Raises:
-        ConfigurationError: If the value is not a valid integer.
+        ValueError: If configuration values are invalid.
     """
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ConfigurationError(
-            f"Environment variable {name} must be an integer, got '{raw}'."
-        ) from exc
+    if config is None:
+        return CHUNKING_CONFIG
+
+    if isinstance(config, ChunkingConfig):
+        return config
+
+    if isinstance(config, AppConfig):
+        return config.chunking
+
+    nested_config = getattr(config, "chunking", None)
+    if isinstance(nested_config, ChunkingConfig):
+        return nested_config
+
+    allowed_fields = {f.name for f in dataclasses.fields(ChunkingConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return CHUNKING_CONFIG
+
+    return ChunkingConfig(**kwargs)
 
 
-def _env_float(name: str, default: float) -> float:
-    """Read a float env var with a descriptive error on bad input.
+def resolve_embedding_config(
+    config: EmbeddingConfig | AppConfig | Any | None = None,
+) -> EmbeddingConfig:
+    """Resolve a user-supplied configuration object to `EmbeddingConfig`.
 
     Args:
-        name: Environment variable name.
-        default: Fallback value when unset/blank.
+        config: A configuration object, mapping, or None.
 
     Returns:
-        The parsed float.
+        A concrete `EmbeddingConfig` instance.
 
     Raises:
-        ConfigurationError: If the value is not a valid float.
+        ValueError: If configuration values are invalid.
     """
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError as exc:
-        raise ConfigurationError(
-            f"Environment variable {name} must be a number, got '{raw}'."
-        ) from exc
+    if config is None:
+        return EMBEDDING_CONFIG
+
+    if isinstance(config, EmbeddingConfig):
+        return config
+
+    if isinstance(config, AppConfig):
+        return config.embedding
+
+    nested_config = getattr(config, "embedding", None)
+    if isinstance(nested_config, EmbeddingConfig):
+        return nested_config
+
+    allowed_fields = {f.name for f in dataclasses.fields(EmbeddingConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return EMBEDDING_CONFIG
+
+    return EmbeddingConfig(**kwargs)
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Read a boolean env var via :func:`src.utils.parse_bool`.
+def resolve_vector_store_config(
+    config: VectorStoreConfig | AppConfig | Any | None = None,
+) -> VectorStoreConfig:
+    """Resolve a user-supplied configuration object to `VectorStoreConfig`.
 
     Args:
-        name: Environment variable name.
-        default: Fallback value when unset/blank.
+        config: A configuration object, mapping, or None.
 
     Returns:
-        The parsed boolean.
+        A concrete `VectorStoreConfig` instance.
 
     Raises:
-        ConfigurationError: If the value cannot be interpreted as boolean.
+        ValueError: If configuration values are invalid.
     """
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return utils.parse_bool(raw)
-    except ValueError as exc:
-        raise ConfigurationError(
-            f"Environment variable {name} must be boolean-like, got '{raw}'."
-        ) from exc
+    if config is None:
+        return VECTOR_STORE_CONFIG
+
+    if isinstance(config, VectorStoreConfig):
+        return config
+
+    if isinstance(config, AppConfig):
+        return config.vector_store
+
+    nested_config = getattr(config, "vector_store", None)
+    if isinstance(nested_config, VectorStoreConfig):
+        return nested_config
+
+    allowed_fields = {f.name for f in dataclasses.fields(VectorStoreConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return VECTOR_STORE_CONFIG
+
+    return VectorStoreConfig(**kwargs)
 
 
-def _ensure_env_loaded() -> None:
-    """Load ``.env`` exactly once (idempotent guard).
-
-    The loaded-state flag is stored on the function object to avoid introducing
-    mutable module-level globals for configuration state.
-    """
-    if getattr(_ensure_env_loaded, "_done", False):
-        return
-    try:
-        from dotenv import load_dotenv
-
-        env_path = Path(__file__).resolve().parents[1] / ".env"
-        load_dotenv(dotenv_path=env_path, override=False)
-    except ImportError:
-        pass
-    _ensure_env_loaded._done = True  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# Lazy singleton accessor (no work happens at import time).
-# ---------------------------------------------------------------------------
-
-_settings: Settings | None = None  # singleton cache; not configuration state.
-
-
-def get_settings(*, reload: bool = False) -> Settings:
-    """Return the cached :class:`Settings`, building it on first call.
-
-    The first call loads environment variables, validates them, and creates all
-    managed directories. Subsequent calls return the cached instance unless
-    ``reload`` is ``True``.
+def resolve_retriever_config(
+    config: RetrieverConfig | AppConfig | Any | None = None,
+) -> RetrieverConfig:
+    """Resolve a user-supplied configuration object to `RetrieverConfig`.
 
     Args:
-        reload: When ``True``, rebuild settings from the environment even if a
-            cached instance exists (useful for tests).
+        config: A configuration object, mapping, or None.
 
     Returns:
-        The application :class:`Settings` instance.
+        A concrete `RetrieverConfig` instance.
 
-    Example:
-        >>> get_settings().app.app_name  # doctest: +SKIP
-        'Full RAG Pipeline'
+    Raises:
+        ValueError: If configuration values are invalid.
     """
-    global _settings
-    if _settings is None or reload:
-        _settings = Settings.from_env()
-        _settings.paths.ensure_directories()
-    return _settings
+    if config is None:
+        return RETRIEVER_CONFIG
+
+    if isinstance(config, RetrieverConfig):
+        return config
+
+    if isinstance(config, AppConfig):
+        return config.retriever
+
+    nested_config = getattr(config, "retriever", None)
+    if isinstance(nested_config, RetrieverConfig):
+        return nested_config
+
+    allowed_fields = {f.name for f in dataclasses.fields(RetrieverConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return RETRIEVER_CONFIG
+
+    return RetrieverConfig(**kwargs)
+
+
+def resolve_llm_config(
+    config: LLMConfig | AppConfig | Any | None = None,
+) -> LLMConfig:
+    """Resolve a user-supplied configuration object to `LLMConfig`.
+
+    Args:
+        config: A configuration object, mapping, or None.
+
+    Returns:
+        A concrete `LLMConfig` instance.
+
+    Raises:
+        ValueError: If configuration values are invalid.
+    """
+    if config is None:
+        return LLM_CONFIG
+
+    if isinstance(config, LLMConfig):
+        return config
+
+    if isinstance(config, AppConfig):
+        return config.llm
+
+    nested_config = getattr(config, "llm", None)
+    if isinstance(nested_config, LLMConfig):
+        return nested_config
+
+    allowed_fields = {f.name for f in dataclasses.fields(LLMConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return LLM_CONFIG
+
+    return LLMConfig(**kwargs)
+
+
+def resolve_evaluation_config(
+    config: EvaluationConfig | AppConfig | Any | None = None,
+) -> EvaluationConfig:
+    """Resolve a user-supplied configuration object to `EvaluationConfig`.
+
+    Args:
+        config: A configuration object, mapping, or None.
+
+    Returns:
+        A concrete `EvaluationConfig` instance.
+
+    Raises:
+        ValueError: If configuration values are invalid.
+    """
+    if config is None:
+        return EVALUATION_CONFIG
+
+    if isinstance(config, EvaluationConfig):
+        return config
+
+    if isinstance(config, AppConfig):
+        return config.evaluation
+
+    nested_config = getattr(config, "evaluation", None)
+    if isinstance(nested_config, EvaluationConfig):
+        return nested_config
+
+    allowed_fields = {f.name for f in dataclasses.fields(EvaluationConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return EVALUATION_CONFIG
+
+    return EvaluationConfig(**kwargs)
+
+
+def resolve_dataset_config(
+    config: DatasetConfig | Any | None = None,
+) -> DatasetConfig:
+    """Resolve a user-supplied object to `DatasetConfig`.
+
+    Args:
+        config: A configuration object, mapping, or None.
+
+    Returns:
+        A concrete `DatasetConfig` instance.
+
+    Raises:
+        ValueError: If configuration values are invalid.
+    """
+    if config is None:
+        return DATASET_CONFIG
+
+    if isinstance(config, DatasetConfig):
+        return config
+
+    allowed_fields = {f.name for f in dataclasses.fields(DatasetConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return DATASET_CONFIG
+
+    return DatasetConfig(**kwargs)
+
+
+def resolve_path_config(
+    config: PathConfig | Any | None = None,
+) -> PathConfig:
+    """Resolve a user-supplied object to `PathConfig`.
+
+    Args:
+        config: A configuration object, mapping, or None.
+
+    Returns:
+        A concrete `PathConfig` instance.
+    """
+    if config is None:
+        return PATH_CONFIG
+
+    if isinstance(config, PathConfig):
+        return config
+
+    allowed_fields = {f.name for f in dataclasses.fields(PathConfig)}
+
+    if isinstance(config, dict):
+        kwargs = {key: value for key, value in config.items() if key in allowed_fields}
+    else:
+        kwargs = {
+            name: getattr(config, name)
+            for name in allowed_fields
+            if hasattr(config, name)
+        }
+
+    if not kwargs:
+        return PATH_CONFIG
+
+    return PathConfig(**kwargs)

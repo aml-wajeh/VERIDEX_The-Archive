@@ -11,7 +11,7 @@ Responsibilities:
     - Provide package-level metadata.
 
 Author:
-    Author Placeholder
+    Aml
 """
 
 __version__ = "0.1.0"

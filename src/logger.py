@@ -20,7 +20,7 @@ Responsibilities:
     - Expose :func:`get_logger` for named module loggers.
 
 Author:
-    Author Placeholder
+    Aml
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Full RAG pipeline using SQuAD v2, ChromaDB, Groq, and Streamlit."
 requires-python = ">=3.12"
 readme = "README.md"
-authors = [{ name = "Author Placeholder" }]
+authors = [{ name = "Aml" }]
 
 [tool.black]
 line-length = 88
@@ -18,6 +18,20 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = []
+
+# app.py holds large CSS/HTML string literals where 88-char lines are
+# unavoidable and harmless; silence E501 there only (src/ + tests/ keep it).
+[tool.ruff.lint.per-file-ignores]
+"app.py" = ["E501"]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+# The Streamlit UI is dynamic HTML; skip strict type-checking on it so the
+# IDE problems panel stays clean (does not affect runtime or tests).
+[[tool.mypy.overrides]]
+module = "app"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,11 +5,12 @@ Title: Project Specification
 Description: Technical specification for the Full RAG Pipeline project.
 
 Responsibilities:
+
 - Preserve the agreed architecture.
 - Track phase-by-phase implementation scope.
 - Document engineering standards for the project.
 
-Author: Author Placeholder
+Author: Aml
 
 ## Project Name
 
