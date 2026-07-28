@@ -30,6 +30,19 @@ from src.retriever import Retriever
 from src.text_processor import TextProcessor
 from src.vector_store import VectorStoreManager
 
+
+def _resolve_api_key(explicit: str) -> str:
+    """Resolve the Groq key: sidebar input -> Streamlit TOML secrets -> env var."""
+    key = (explicit or "").strip()
+    if key:
+        return key
+    try:
+        key = str(st.secrets.get("GROQ_API_KEY", "") or "").strip()
+    except Exception:  # no secrets file locally / key absent on Cloud
+        key = ""
+    return key or os.environ.get("GROQ_API_KEY", "").strip()
+
+
 # ============================================================
 # Conversation memory (UI-layer only; src/ is untouched)
 # ============================================================
@@ -272,6 +285,8 @@ div[data-testid="stSlider"]{font-family:'IBM Plex Mono',monospace;}
 html, body, .stApp, [data-testid="stAppViewContainer"]{background-color:var(--ink)!important;}
 header[data-testid="stHeader"]{background:transparent!important;}
 section[data-testid="stSidebar"], section[data-testid="stSidebar"]>div{background-color:var(--ink-2)!important;}
+.node .v{display:flex;flex-direction:column;align-items:flex-start;gap:.4rem;}
+.node .v small{display:block;line-height:1.2;}
 </style>
 """,
     unsafe_allow_html=True,
@@ -309,6 +324,18 @@ def _build_archive() -> _Archive:
     except DatasetLoadingError:
         loader.load_from_records(_FALLBACK_RECORDS, validate=True)
         docs = loader.documents("train")
+
+    # Keep the free-tier cloud build fast & within memory: sample the corpus
+    # only when SAMPLE_CORPUS is enabled (set it in Streamlit Secrets for the
+    # deployed app; leave it unset locally so the full dataset is indexed).
+    _sample_flag = os.environ.get("SAMPLE_CORPUS", "").strip()
+    if not _sample_flag:
+        try:
+            _sample_flag = str(st.secrets.get("SAMPLE_CORPUS", "") or "").strip()
+        except Exception:
+            _sample_flag = ""
+    if _sample_flag.lower() in {"1", "true", "yes"}:
+        docs = docs[:300]
 
     gold = [
         {
@@ -659,7 +686,7 @@ with st.sidebar:
 # Optional benchmark panel
 # ============================================================
 if run_eval:
-    if not (api_key_input or os.environ.get("GROQ_API_KEY", "")).strip():
+    if not (_resolve_api_key(api_key_input)).strip():
         st.markdown(
             '<div class="error-card">⚠ Paste a Groq key in the sidebar (or set '
             "GROQ_API_KEY) to run the benchmark.</div>",
@@ -677,7 +704,7 @@ if run_eval:
             try:
                 llm = _build_llm(
                     model_name,
-                    api_key_input or os.environ.get("GROQ_API_KEY", ""),
+                    _resolve_api_key(api_key_input),
                 )
                 eval_pipeline = RAGPipeline(retriever=archive.retriever, llm_client=llm)
                 engine = EvaluationEngine(pipeline=eval_pipeline)
@@ -745,7 +772,7 @@ with col_btn:
 result_slot = st.empty()
 
 if ask_clicked and question.strip():
-    if not (api_key_input or os.environ.get("GROQ_API_KEY", "")).strip():
+    if not (_resolve_api_key(api_key_input)).strip():
         result_slot.markdown(
             '<div class="error-card">⚠ Enter a free Groq API key in the sidebar first — '
             'get one instantly at <a href="https://console.groq.com/keys" '
@@ -763,7 +790,7 @@ if ask_clicked and question.strip():
         try:
             llm = _build_llm(
                 model_name,
-                api_key_input or os.environ.get("GROQ_API_KEY", ""),
+                _resolve_api_key(api_key_input),
             )
             pipeline_question = (
                 _augment_question(question, st.session_state.chat_history)
